@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LandmarkLens</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary-color: #1A237E;
+            --accent-color: #00BCD4;
+            --bg-color: #F5F5F5;
+            --text-color: #333333;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Roboto', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        .app-container {
+            position: relative;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #videoFeed {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        #arOverlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        .info-card {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            right: 20px;
+            background-color: rgba(255, 255, 255, 0.9);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s ease;
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+
+        .info-card.collapsed {
+            transform: translateY(calc(100% - 60px));
+        }
+
+        .info-card h2 {
+            color: var(--primary-color);
+            margin-bottom: 10px;
+        }
+
+        .info-card p {
+            margin-bottom: 15px;
+        }
+
+        .nearby-attractions {
+            display: flex;
+            overflow-x: auto;
+            padding: 10px 0;
+        }
+
+        .attraction-card {
+            flex: 0 0 auto;
+            width: 150px;
+            margin-right: 15px;
+            background-color: white;
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .attraction-card img {
+            width: 100%;
+            height: 100px;
+            object-fit: cover;
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+
+        .attraction-card h3 {
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+
+        .attraction-card p {
+            font-size: 12px;
+            color: #666;
+        }
+
+        .loading-indicator {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: var(--accent-color);
+            animation: spin 1s ease-in-out infinite;
+            display: none;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <video id="videoFeed" autoplay playsinline></video>
+        <canvas id="arOverlay"></canvas>
+        
+        <div class="info-card collapsed">
+            <h2 id="landmarkName">Detecting Landmarks...</h2>
+            <p id="landmarkDescription"></p>
+            <div class="nearby-attractions" id="nearbyAttractions"></div>
+        </div>
+
+        <div class="loading-indicator" id="loadingIndicator"></div>
+    </div>
+
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDmnge0f1XdxLvvBPMW1pJKe5QQmGsKTiQ&libraries=places"></script>
+    <script>
+        const video = document.getElementById('videoFeed');
+        const canvas = document.getElementById('arOverlay');
+        const ctx = canvas.getContext('2d');
+        const landmarkName = document.getElementById('landmarkName');
+        const landmarkDescription = document.getElementById('landmarkDescription');
+        const nearbyAttractions = document.getElementById('nearbyAttractions');
+        const loadingIndicator = document.getElementById('loadingIndicator');
+        const infoCard = document.querySelector('.info-card');
+
+        const apiKey = 'AIzaSyDmnge0f1XdxLvvBPMW1pJKe5QQmGsKTiQ';
+        let lastDetectedLandmark = '';
+        let isProcessing = false;
+
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                };
+            } catch (error) {
+                console.error('Error accessing camera:', error);
+            }
+        }
+
+        async function captureFrame() {
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = video.videoWidth;
+            tempCanvas.height = video.videoHeight;
+            tempCanvas.getContext('2d').drawImage(video, 0, 0);
+            return tempCanvas.toDataURL('image/jpeg').split(',')[1];
+        }
+
+        async function detectLandmark(imageData) {
+            const apiUrl = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
+            const requestBody = {
+                requests: [{
+                    image: { content: imageData },
+                    features: [{ type: 'LANDMARK_DETECTION', maxResults: 1 }]
+                }]
+            };
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestBody)
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch data from Google Vision API');
+            }
+
+            const data = await response.json();
+            return data.responses[0].landmarkAnnotations;
+        }
+
+        async function fetchLandmarkFacts(landmarkName) {
+            const apiUrl = `https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro=false&explaintext=true&titles=${encodeURIComponent(landmarkName)}&origin=*`;
+
+            const response = await fetch(apiUrl);
+            if (!response.ok) {
+                throw new Error('Failed to fetch landmark information');
+            }
+
+            const data = await response.json();
+            const pages = data.query.pages;
+            const pageId = Object.keys(pages)[0];
+            const page = pages[pageId];
+
+            return page.extract ? page.extract : 'No description available.';
+        }
+
+        function displayLandmarkInfo(name, description) {
+            landmarkName.textContent = name;
+            landmarkDescription.textContent = description;
+            infoCard.classList.remove('collapsed');
+        }
+
+        function drawAROverlay(name, location) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(0, 0, canvas.width, 50);
+            ctx.fillStyle = 'white';
+            ctx.font = '20px Roboto';
+            ctx.fillText(name, 10, 35);
+            if (location) {
+                ctx.fillText(`Lat: ${location.latitude.toFixed(4)}, Lng: ${location.longitude.toFixed(4)}`, 10, 70);
+            }
+        }
+
+        async function getNearbyAttractions(location) {
+            const service = new google.maps.places.PlacesService(document.createElement('div'));
+            const request = {
+                location: new google.maps.LatLng(location.latitude, location.longitude),
+                radius: '1000',
+                type: ['tourist_attraction']
+            };
+
+            return new Promise((resolve, reject) => {
+                service.nearbySearch(request, (results, status) => {
+                    if (status === google.maps.places.PlacesServiceStatus.OK) {
+                        resolve(results);
+                    } else {
+                        reject(new Error('Failed to fetch nearby attractions'));
+                    }
+                });
+            });
+        }
+
+        function displayNearbyAttractions(attractions) {
+            nearbyAttractions.innerHTML = '';
+            attractions.forEach(place => {
+                const card = document.createElement('div');
+                card.className = 'attraction-card';
+                card.innerHTML = `
+                    <img src="${place.photos ? place.photos[0].getUrl({maxWidth: 150, maxHeight: 100}) : 'placeholder.jpg'}" alt="${place.name}">
+                    <h3>${place.name}</h3>
+                    <p>${place.rating ? `Rating: ${place.rating}` : 'No rating available'}</p>
+                `;
+                nearbyAttractions.appendChild(card);
+            });
+        }
+
+        async function processFrame() {
+            if (isProcessing) return;
+            isProcessing = true;
+            loadingIndicator.style.display = 'block';
+
+            try {
+                const imageData = await captureFrame();
+                const landmarks = await detectLandmark(imageData);
+
+                if (landmarks && landmarks.length > 0) {
+                    const landmark = landmarks[0];
+                    if (landmark.score >= 0.5 && landmark.description !== lastDetectedLandmark) {
+                        lastDetectedLandmark = landmark.description;
+                        const facts = await fetchLandmarkFacts(landmark.description);
+                        displayLandmarkInfo(landmark.description, facts);
+                        drawAROverlay(landmark.description, landmark.locations[0]);
+
+                        const nearbyAttractions = await getNearbyAttractions(landmark.locations[0]);
+                        displayNearbyAttractions(nearbyAttractions);
+                    }
+                }
+            } catch (error) {
+                console.error('Error processing frame:', error);
+            } finally {
+                isProcessing = false;
+                loadingIndicator.style.display = 'none';
+            }
+        }
+
+        infoCard.addEventListener('click', () => {
+            infoCard.classList.toggle('collapsed');
+        });
+
+        startCamera();
+        // Continuous real-time processing
+        setInterval(processFrame, 5000); // Process a frame every 5 seconds
+    </script>
+</body>
+</html>
